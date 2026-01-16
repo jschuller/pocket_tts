@@ -19,10 +19,17 @@ Lightweight CPU-based Text-to-Speech extension for [text-generation-webui](https
 
 ## Installation
 
-1. **Copy the extension** to your text-generation-webui:
-   ```bash
-   cp -r pocket_tts/ /path/to/text-generation-webui/extensions/
-   ```
+### Option 1: Git Clone (Recommended)
+
+```bash
+cd /path/to/text-generation-webui/extensions
+git clone https://github.com/jschuller/pocket_tts.git
+pip install -r pocket_tts/requirements.txt
+```
+
+### Option 2: Manual Download
+
+1. Download and extract to `text-generation-webui/extensions/pocket_tts/`
 
 2. **Install dependencies**:
    ```bash
