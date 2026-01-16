@@ -1,0 +1,18 @@
+# Test sentences for Pocket TTS voice preview
+# These sentences cover various phonetic patterns for voice quality testing
+
+Hello! This is a preview of the selected voice.
+The quick brown fox jumps over the lazy dog.
+She sells seashells by the seashore.
+How much wood would a woodchuck chuck if a woodchuck could chuck wood?
+Peter Piper picked a peck of pickled peppers.
+I scream, you scream, we all scream for ice cream.
+The rain in Spain stays mainly in the plain.
+Unique New York, you know you need unique New York.
+Red leather, yellow leather, red leather, yellow leather.
+Six slippery snails slid slowly seaward.
+A proper copper coffee pot.
+Around the rugged rocks the ragged rascal ran.
+Whether the weather is cold, or whether the weather is hot.
+I saw Susie sitting in a shoeshine shop.
+Can you imagine an imaginary menagerie manager imagining managing an imaginary menagerie?

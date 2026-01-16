@@ -1,0 +1,24 @@
+# Generated audio files
+outputs/*.wav
+!outputs/.gitkeep
+
+# Custom voice files (user-specific)
+voices/*.wav
+!voices/.gitkeep
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
