@@ -5,6 +5,7 @@ outputs/*.wav
 # Custom voice files (user-specific)
 voices/*.wav
 !voices/.gitkeep
+voices/.cache/
 
 # Python cache
 __pycache__/
