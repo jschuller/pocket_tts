@@ -1,13 +1,15 @@
 """
 Pocket TTS Extension for text-generation-webui
 
-A lightweight CPU-based TTS using Kyutai's Pocket TTS (100M params).
-Generates audio for bot responses with voice cloning support.
+A lightweight CPU-based TTS using Kyutai's Pocket TTS (pocket-tts 3.x, ~100M params).
+Generates audio for bot responses, in several languages, with optional voice cloning.
 """
 import html
 import re
+import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import gradio as gr
 import scipy.io.wavfile
@@ -19,42 +21,97 @@ from modules.utils import gradio
 params = {
     'activate': True,
     'voice': 'alba',
+    'language': 'english',
     'autoplay': True,
     'show_text': False,
 }
 
-# Built-in voice options
-BUILTIN_VOICES = ['alba', 'marius', 'javert', 'jean', 'fantine', 'cosette', 'eponine', 'azelma']
+# Pre-made voices. Every voice has an embedding for every language; the first eight are the
+# original English voices, the rest are the upstream default voices for the other languages.
+BUILTIN_VOICES = [
+    'alba', 'marius', 'javert', 'jean', 'fantine', 'cosette', 'eponine', 'azelma',
+    'estelle', 'juergen', 'rafael', 'giovanni', 'lola', 'daan',
+]
+LANGUAGES = ['english', 'french', 'german', 'portuguese', 'italian', 'spanish', 'dutch']
 
-# Model and voice state cache
-_model = None
-_voice_states = {}
+EXTENSION_DIR = Path(__file__).resolve().parent
+VOICES_DIR = EXTENSION_DIR / 'voices'           # custom WAVs to clone
+VOICE_CACHE_DIR = VOICES_DIR / '.cache'          # exported voice states (.safetensors)
+OUTPUT_DIR = Path('extensions/pocket_tts/outputs')  # relative to webui root: served as file/...
+
+CLONING_HELP = (
+    "Voice cloning needs the gated Pocket TTS weights: accept the terms at "
+    "https://huggingface.co/kyutai/pocket-tts, run `hf auth login`, then restart the webui. "
+    "Built-in voices work without it."
+)
+
+# Model and voice state cache (one model at a time, keyed by language)
+_model: Any = None
+_model_language: str | None = None
+_voice_states: dict[tuple[str, str], Any] = {}
+_lock = threading.Lock()  # generate_audio is not thread-safe
 
 
-def load_model():
-    """Load the Pocket TTS model (lazy loading, cached)."""
-    global _model
-    if _model is None:
+def load_model(language: str | None = None) -> Any:
+    """Load the Pocket TTS model for a language (lazy, cached; reloads on language change)."""
+    global _model, _model_language
+    language = language or params['language']
+    if _model is None or _model_language != language:
         from pocket_tts import TTSModel
-        print("Loading Pocket TTS model...")
-        _model = TTSModel.load_model()
-        print("Pocket TTS model loaded successfully")
+        print(f"Loading Pocket TTS model ({language})...")
+        _model = TTSModel.load_model(language=language)  # always on CPU
+        _model_language = language
+        _voice_states.clear()
+        cloning = 'enabled' if _model.has_voice_cloning else 'unavailable (ungated weights)'
+        print(f"Pocket TTS model loaded; voice cloning {cloning}")
     return _model
 
 
-def get_voice_state(voice: str):
-    """Get or cache voice state for a given voice."""
-    if voice not in _voice_states:
+def list_voices() -> list[str]:
+    """Built-in voices followed by any custom WAVs in voices/."""
+    custom = sorted(p.stem for p in VOICES_DIR.glob('*.wav') if p.stem not in BUILTIN_VOICES)
+    return BUILTIN_VOICES + custom
+
+
+def _custom_voice_state(model: Any, wav: Path, language: str) -> Any:
+    """Clone a voice from a WAV once, export the state, and reuse the export afterwards."""
+    from pocket_tts import export_model_state
+    cached = VOICE_CACHE_DIR / f'{wav.stem}.{language}.safetensors'
+    if cached.exists() and cached.stat().st_mtime >= wav.stat().st_mtime:
+        return model.get_state_for_audio_prompt(cached)
+    if not model.has_voice_cloning:
+        raise RuntimeError(CLONING_HELP)
+    print(f"Cloning voice from {wav.name} (first use, then cached)...")
+    state = model.get_state_for_audio_prompt(wav, truncate=True)
+    VOICE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    export_model_state(state, cached)
+    return state
+
+
+def get_voice_state(voice: str) -> Any:
+    """Get or cache the voice state for the current language."""
+    model = load_model()
+    key = (_model_language, voice)
+    if key not in _voice_states:
+        wav = VOICES_DIR / f'{voice}.wav'
+        if voice not in BUILTIN_VOICES and wav.exists():
+            _voice_states[key] = _custom_voice_state(model, wav, _model_language)
+        else:
+            if voice not in BUILTIN_VOICES:
+                print(f"Pocket TTS: voice '{voice}' not found, using 'alba'")
+                voice = 'alba'
+            _voice_states[key] = model.get_state_for_audio_prompt(voice)
+    return _voice_states[key]
+
+
+def synthesize(text: str, output_file: Path) -> None:
+    """Generate speech for text with the selected voice and write it as a WAV file."""
+    with _lock:
         model = load_model()
-        print(f"Loading voice state for '{voice}'...")
-        _voice_states[voice] = model.get_state_for_audio_prompt(voice)
-    return _voice_states[voice]
-
-
-def clear_voice_cache():
-    """Clear the voice state cache (call when voice changes)."""
-    global _voice_states
-    _voice_states = {}
+        voice_state = get_voice_state(params['voice'])
+        audio = model.generate_audio(voice_state, text)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    scipy.io.wavfile.write(str(output_file), model.sample_rate, audio.numpy())
 
 
 def preprocess_text(text: str) -> str:
@@ -111,24 +168,15 @@ def output_modifier(string, state):
         return string
 
     original_string = string
-
-    # Preprocess text
     text = preprocess_text(string)
 
     if not text:
         return '*Empty response*' if not original_string.strip() else original_string
 
     try:
-        # Generate audio
-        model = load_model()
-        voice_state = get_voice_state(params['voice'])
-        audio = model.generate_audio(voice_state, text)
-
-        # Save WAV file
         character = state.get('character_menu', 'unknown')
-        output_file = Path(f'extensions/pocket_tts/outputs/{character}_{int(time.time())}.wav')
-        output_file.parent.mkdir(parents=True, exist_ok=True)
-        scipy.io.wavfile.write(str(output_file), model.sample_rate, audio.numpy())
+        output_file = OUTPUT_DIR / f'{character}_{int(time.time())}.wav'
+        synthesize(text, output_file)
 
         # Build HTML audio element
         autoplay = 'autoplay' if params['autoplay'] else ''
@@ -148,8 +196,9 @@ def output_modifier(string, state):
 
 def setup():
     """Initialize the extension (called once at startup)."""
-    # Create outputs directory if it doesn't exist
-    Path('extensions/pocket_tts/outputs').mkdir(parents=True, exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    if params['language'] not in LANGUAGES:
+        params['language'] = 'english'
 
 
 def remove_tts_from_history(history):
@@ -178,19 +227,14 @@ def toggle_text_in_history(history):
     return history
 
 
-def voice_preview(text):
+def voice_preview(text: str) -> str:
     """Generate preview audio for testing voice settings."""
     if not text:
         text = "Hello! This is a preview of the selected voice."
 
     try:
-        model = load_model()
-        voice_state = get_voice_state(params['voice'])
-        audio = model.generate_audio(voice_state, text)
-
-        output_file = Path('extensions/pocket_tts/outputs/voice_preview.wav')
-        scipy.io.wavfile.write(str(output_file), model.sample_rate, audio.numpy())
-
+        output_file = OUTPUT_DIR / 'voice_preview.wav'
+        synthesize(text, output_file)
         return f'<audio src="file/{output_file.as_posix()}?{int(time.time())}" controls autoplay></audio>'
     except Exception as e:
         return f'Error: {e}'
@@ -205,11 +249,10 @@ def ui():
 
         show_text = gr.Checkbox(value=params['show_text'], label='Show message text under audio player')
 
-        voice = gr.Dropdown(
-            value=params['voice'],
-            choices=BUILTIN_VOICES,
-            label='Voice'
-        )
+        with gr.Row():
+            language = gr.Dropdown(value=params['language'], choices=LANGUAGES, label='Language')
+            voice = gr.Dropdown(value=params['voice'], choices=list_voices(), label='Voice')
+            refresh_voices = gr.Button('Refresh voices')
 
         with gr.Row():
             preview_text = gr.Textbox(
@@ -257,15 +300,12 @@ def ui():
         chat.redraw_html, gradio(ui_chat.reload_arr), gradio('display')
     )
 
-    # Parameter update handlers
+    # Parameter update handlers (voice states are cached per (language, voice))
     activate.change(lambda x: params.update({"activate": x}), activate, None)
     autoplay.change(lambda x: params.update({"autoplay": x}), autoplay, None)
-
-    def on_voice_change(x):
-        params.update({"voice": x})
-        clear_voice_cache()  # Clear cache so new voice loads
-
-    voice.change(on_voice_change, voice, None)
+    voice.change(lambda x: params.update({"voice": x}), voice, None)
+    language.change(lambda x: params.update({"language": x}), language, None)  # model reloads on next use
+    refresh_voices.click(lambda: gr.update(choices=list_voices()), None, voice)
 
     # Preview handlers
     preview_text.submit(voice_preview, preview_text, preview_audio)

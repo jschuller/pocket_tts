@@ -1,2 +1,2 @@
-pocket-tts>=0.1.0
+pocket-tts>=3.3,<4
 scipy>=1.10.0
